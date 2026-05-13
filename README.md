@@ -1,5 +1,30 @@
 # coarse
 
+> ### 🛠️ Personal fork — `mzchou/coarse`
+>
+> This repository is a personal fork of [`Davidvandijcke/coarse`](https://github.com/Davidvandijcke/coarse) customised for econ-paper reviews. It is **not synced with upstream** and is **not intended as a general-purpose distribution**. Version is tagged `1.4.1+mzchou.1`.
+>
+> **Fork-specific changes:**
+> - OpenAlex replaces the arXiv fallback in `coarse.agents.literature` — broader coverage of economics, public health, and social-science working papers (NBER, SSRN, RePEc) plus venue and citation_count signals.
+> - Literature search returns 15 papers (was 8) with 1200-char abstracts (was 500) — denser context for the overview and intro/related-work agents.
+> - The bundled Claude Code skill is wired to install directly from this fork, not from PyPI's `coarse-ink`.
+>
+> **Install from this fork** (one command, no clone needed):
+>
+> ```bash
+> uvx --python 3.12 --from 'git+ssh://git@github.com/mzchou/coarse.git@dev' coarse-review --help
+> ```
+>
+> **Refresh the Claude Code `/coarse-review` skill from this fork:**
+>
+> ```bash
+> uvx --python 3.12 --from 'git+ssh://git@github.com/mzchou/coarse.git@dev' coarse install-skills --all --force
+> ```
+>
+> Everything below this notice is upstream documentation, kept verbatim for reference.
+
+---
+
 [![CI](https://github.com/Davidvandijcke/coarse/actions/workflows/ci.yml/badge.svg)](https://github.com/Davidvandijcke/coarse/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/coarse-ink)](https://pypi.org/project/coarse-ink/)
 [![Downloads](https://img.shields.io/endpoint?url=https%3A%2F%2Fcoarse.ink%2Fapi%2Fdownloads)](https://pypistats.org/packages/coarse-ink)

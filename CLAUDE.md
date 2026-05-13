@@ -1,5 +1,18 @@
 # CLAUDE.md — coarse
 
+> ## ⚠️ THIS IS A PERSONAL FORK — READ BEFORE TOUCHING ANYTHING
+>
+> - **Owner**: `mzchou/coarse` (a fork of `Davidvandijcke/coarse`).
+> - **Purpose**: customise the tool for the owner's own econ-paper review workflow. **Not synced with upstream** — do NOT `git pull upstream …` unless the owner explicitly asks.
+> - **Upstream push is disabled**: `upstream` remote's push URL is set to `DISABLED_NO_PUSH` on purpose. Don't "fix" that.
+> - **Default branch**: `dev`. All work goes through feature branches → self-merge PRs into `dev` on `mzchou/coarse`. Never open PRs against `Davidvandijcke/coarse` without explicit instruction.
+> - **This fork is the canonical install source.** The `/coarse-review` Claude Code skill at `~/.claude/skills/coarse-review/SKILL.md` is wired to `git+ssh://git@github.com/mzchou/coarse.git@dev` (not PyPI `coarse-ink`). Edits to `src/coarse/_skills/claude_code/SKILL.md` must be re-installed via `uvx --python 3.12 --from 'git+ssh://git@github.com/mzchou/coarse.git@dev' coarse install-skills --all --force` for the slash-command to pick them up.
+> - **Editable dev install** lives at `.venv/` in this repo (`uv venv && uv pip install -e ".[all]"`). Use `./.venv/bin/coarse-review …` for fast iteration; `uvx` re-clones from GitHub on every run.
+> - **Version string**: `1.4.1+mzchou.1` — the `+mzchou.N` suffix is intentional to flag "this is the fork, not upstream PyPI." Bump the `N` when shipping a new milestone.
+> - **Fork-specific changes so far**: OpenAlex replaces the arXiv fallback for econ-friendly literature search; literature top-K is 15 and abstracts are 1200 chars (vs upstream's 8 and 500); the Claude Code skill points at the fork. See `git log dev` for the canonical history.
+>
+> Anything not in this list is presumed identical to upstream.
+
 ## What This Is
 
 Free, open-source AI academic paper reviewer. The rough alternative to refine.ink.
