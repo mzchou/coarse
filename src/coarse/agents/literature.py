@@ -1,61 +1,63 @@
 """Literature search agent — finds related papers to ground the review.
 
 Primary path: Perplexity Sonar Pro Search via OpenRouter (web-grounded, ~12s, ~$0.03).
-Fallback path: arXiv API + 2 LLM calls (free API, slower, arXiv-only coverage).
+Fallback path: OpenAlex API + 2 LLM calls (free, no key, indexes 240M+ scholarly
+works across journals, working papers, preprints, and books — including econ
+sources arXiv misses, such as NBER, SSRN, RePEc, and major journal publishers).
+
+Set OPENALEX_EMAIL in the environment to route through OpenAlex's polite pool.
 """
 
 from __future__ import annotations
 
 import logging
-import urllib.parse
-import urllib.request
-import xml.etree.ElementTree as ET
+import os
 from dataclasses import dataclass
 
+import requests
 from pydantic import BaseModel, Field
 
 from coarse.config import has_provider_key
 from coarse.llm import LLMClient
 from coarse.models import LITERATURE_SEARCH_MODEL
 from coarse.prompts import (
-    ARXIV_QUERY_GEN_SYSTEM,
-    ARXIV_RANKING_SYSTEM,
+    LITERATURE_QUERY_GEN_SYSTEM,
+    LITERATURE_RANKING_SYSTEM,
     PERPLEXITY_SYSTEM,
     perplexity_user,
 )
 
 logger = logging.getLogger(__name__)
 
-_ARXIV_API = "https://export.arxiv.org/api/query"
+_OPENALEX_API = "https://api.openalex.org/works"
 _MAX_RESULTS_PER_QUERY = 10
 _MAX_ITERATIONS = 2
 _TOP_K = 8
 _PERPLEXITY_TEMPERATURE = 0.3
 _QUERY_GEN_TEMPERATURE = 0.5
 _RANKING_TEMPERATURE = 0.2
-
-# Atom namespace used by arXiv API
-_NS = {"atom": "http://www.w3.org/2005/Atom"}
+_OPENALEX_FIELDS = (
+    "id,title,display_name,publication_year,authorships,"
+    "abstract_inverted_index,primary_location,cited_by_count,doi"
+)
 
 
 @dataclass
-class ArxivPaper:
-    """Minimal representation of an arXiv search result."""
+class OpenAlexWork:
+    """Minimal representation of an OpenAlex /works search result."""
 
-    arxiv_id: str
+    work_id: str
     title: str
     authors: list[str]
     abstract: str
-    published: str
-
-
-# ---------------------------------------------------------------------------
-# LLM response models
-# ---------------------------------------------------------------------------
+    year: str
+    venue: str
+    cited_by_count: int = 0
+    doi: str = ""
 
 
 class _SearchQueries(BaseModel):
-    """LLM-generated search queries for arXiv."""
+    """LLM-generated search queries for OpenAlex."""
 
     queries: list[str] = Field(min_length=1, max_length=5)
 
@@ -63,7 +65,7 @@ class _SearchQueries(BaseModel):
 class _RankedResult(BaseModel):
     """A single ranked search result."""
 
-    arxiv_id: str
+    work_id: str
     relevance_score: float = Field(ge=0.0, le=1.0)
     reason: str
 
@@ -75,18 +77,8 @@ class _RankedResults(BaseModel):
     refinement_queries: list[str] = Field(default_factory=list, max_length=3)
 
 
-# ---------------------------------------------------------------------------
-# Perplexity Sonar Pro Search (primary path)
-# ---------------------------------------------------------------------------
-
-
 def _search_perplexity(title: str, abstract: str, client: LLMClient) -> str:
-    """Single Perplexity Sonar Pro Search call via LLMClient.complete_text.
-
-    Returns formatted literature context string, or raises on failure. Routes
-    through LLMClient so OpenRouter privacy / api_key / control-char stripping
-    all apply uniformly with the rest of the pipeline.
-    """
+    """Primary path: web-grounded literature search via Perplexity Sonar Pro."""
     perplexity_client = LLMClient(model=LITERATURE_SEARCH_MODEL)
     messages = [
         {"role": "system", "content": PERPLEXITY_SYSTEM},
@@ -102,124 +94,127 @@ def _search_perplexity(title: str, abstract: str, client: LLMClient) -> str:
     return content
 
 
-# ---------------------------------------------------------------------------
-# arXiv API helpers (stdlib only) — fallback path
-# ---------------------------------------------------------------------------
+def _openalex_user_agent() -> str:
+    email = os.environ.get("OPENALEX_EMAIL", "").strip()
+    if email:
+        return f"coarse-ink (mailto:{email})"
+    return "coarse-ink (https://github.com/Davidvandijcke/coarse)"
 
 
-def _search_arxiv(query: str, max_results: int = _MAX_RESULTS_PER_QUERY) -> list[ArxivPaper]:
-    """Search arXiv API and parse Atom XML response."""
-    params = urllib.parse.urlencode(
-        {
-            "search_query": f"all:{query}",
-            "start": 0,
-            "max_results": max_results,
-            "sortBy": "relevance",
-            "sortOrder": "descending",
-        }
+def _reconstruct_abstract(inverted_index: dict[str, list[int]] | None) -> str:
+    """OpenAlex returns abstracts as {word: [positions]}; rebuild the text."""
+    if not inverted_index:
+        return ""
+    positions: dict[int, str] = {}
+    for word, idx_list in inverted_index.items():
+        for pos in idx_list:
+            positions[pos] = word
+    if not positions:
+        return ""
+    return " ".join(positions[i] for i in sorted(positions))
+
+
+def _extract_venue(work: dict) -> str:
+    primary = work.get("primary_location") or {}
+    source = primary.get("source") or {}
+    venue = source.get("display_name") or ""
+    if venue:
+        return venue
+    host = work.get("host_venue") or {}
+    return host.get("display_name") or ""
+
+
+def _parse_openalex_work(work: dict) -> OpenAlexWork | None:
+    raw_id = work.get("id") or ""
+    work_id = raw_id.rsplit("/", 1)[-1] if raw_id else ""
+    title = (work.get("title") or work.get("display_name") or "").strip()
+    if not title:
+        return None
+    authors: list[str] = []
+    for au in work.get("authorships", []) or []:
+        name = (au.get("author") or {}).get("display_name") or ""
+        if name:
+            authors.append(name.strip())
+    abstract = _reconstruct_abstract(work.get("abstract_inverted_index"))
+    year = work.get("publication_year")
+    doi_raw = work.get("doi") or ""
+    return OpenAlexWork(
+        work_id=work_id,
+        title=" ".join(title.split()),
+        authors=authors,
+        abstract=abstract[:500],
+        year=str(year) if year else "",
+        venue=_extract_venue(work),
+        cited_by_count=int(work.get("cited_by_count") or 0),
+        doi=doi_raw.replace("https://doi.org/", "") if doi_raw else "",
     )
-    url = f"{_ARXIV_API}?{params}"
 
+
+def _search_openalex(
+    query: str, max_results: int = _MAX_RESULTS_PER_QUERY
+) -> list[OpenAlexWork]:
+    params = {
+        "search": query,
+        "per-page": max_results,
+        "select": _OPENALEX_FIELDS,
+    }
     try:
-        with urllib.request.urlopen(url, timeout=15) as resp:
-            xml_data = resp.read()
+        resp = requests.get(
+            _OPENALEX_API,
+            params=params,
+            headers={"User-Agent": _openalex_user_agent()},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
     except Exception:
-        logger.warning("arXiv API request failed for query: %s", query)
+        logger.warning("OpenAlex API request failed for query: %s", query)
         return []
 
-    return _parse_arxiv_response(xml_data)
+    works: list[OpenAlexWork] = []
+    for raw in payload.get("results") or []:
+        parsed = _parse_openalex_work(raw)
+        if parsed:
+            works.append(parsed)
+    return works
 
 
-def _parse_arxiv_response(xml_data: bytes) -> list[ArxivPaper]:
-    """Parse arXiv Atom XML into ArxivPaper objects."""
-    root = ET.fromstring(xml_data)
-    papers = []
-
-    for entry in root.findall("atom:entry", _NS):
-        # Extract arxiv ID from the <id> URL
-        id_url = entry.findtext("atom:id", default="", namespaces=_NS)
-        arxiv_id = id_url.rsplit("/abs/", 1)[-1] if "/abs/" in id_url else id_url
-
-        title = entry.findtext("atom:title", default="", namespaces=_NS).strip()
-        title = " ".join(title.split())  # normalize whitespace
-
-        abstract = entry.findtext("atom:summary", default="", namespaces=_NS).strip()
-        abstract = " ".join(abstract.split())
-
-        authors = [
-            name.text.strip() for name in entry.findall("atom:author/atom:name", _NS) if name.text
-        ]
-
-        published = entry.findtext("atom:published", default="", namespaces=_NS)[:10]
-
-        if title:
-            papers.append(
-                ArxivPaper(
-                    arxiv_id=arxiv_id,
-                    title=title,
-                    authors=authors,
-                    abstract=abstract[:500],
-                    published=published,
-                )
-            )
-
-    return papers
-
-
-# ---------------------------------------------------------------------------
-# arXiv fallback pipeline
-# ---------------------------------------------------------------------------
-
-
-def _search_arxiv_pipeline(
+def _search_openalex_pipeline(
     title: str,
     abstract: str,
     client: LLMClient,
 ) -> str:
-    """Run the arXiv-based literature search (fallback path).
-
-    Returns a formatted context block of related papers, or "" if search fails.
-    """
-    # Step 1: Generate search queries
+    """Run the OpenAlex literature search (fallback path)."""
     queries = _generate_queries(title, abstract, client)
     if not queries:
         return ""
 
-    # Step 2+3: Search and collect results, iterating if needed
-    all_papers: dict[str, ArxivPaper] = {}  # keyed by arxiv_id for dedup
+    all_works: dict[str, OpenAlexWork] = {}
+    ranked: list[_RankedResult] = []
 
     for iteration in range(_MAX_ITERATIONS):
         for query in queries:
-            papers = _search_arxiv(query)
-            for p in papers:
-                if p.arxiv_id not in all_papers:
-                    all_papers[p.arxiv_id] = p
+            for w in _search_openalex(query):
+                if w.work_id and w.work_id not in all_works:
+                    all_works[w.work_id] = w
 
-        if not all_papers:
+        if not all_works:
             break
 
-        # Step 3: Rank results and get refinement queries
         ranked, refinement_queries = _rank_results(
-            title, abstract, list(all_papers.values()), client
+            title, abstract, list(all_works.values()), client
         )
 
-        # Step 4: Iterate with refinement queries if provided
         if iteration < _MAX_ITERATIONS - 1 and refinement_queries:
             queries = refinement_queries
         else:
             break
 
-    if not all_papers:
+    if not all_works:
         logger.info("Literature search found no results")
         return ""
 
-    # Step 5: Compile top results
-    return _compile_context(ranked[:_TOP_K], all_papers)
-
-
-# ---------------------------------------------------------------------------
-# Main dispatcher
-# ---------------------------------------------------------------------------
+    return _compile_context(ranked[:_TOP_K], all_works)
 
 
 def search_literature(
@@ -230,7 +225,7 @@ def search_literature(
     """Run the literature search. Signature unchanged for pipeline.py.
 
     Uses Perplexity Sonar Pro Search if OPENROUTER_API_KEY is set,
-    falling back to the arXiv pipeline on failure or missing key.
+    falling back to the OpenAlex pipeline on failure or missing key.
     """
     if has_provider_key("openrouter"):
         try:
@@ -238,15 +233,16 @@ def search_literature(
             logger.info("Literature search completed via Perplexity")
             return result
         except Exception:
-            logger.warning("Perplexity search failed, falling back to arXiv", exc_info=True)
+            logger.warning(
+                "Perplexity search failed, falling back to OpenAlex", exc_info=True
+            )
 
-    return _search_arxiv_pipeline(title, abstract, client)
+    return _search_openalex_pipeline(title, abstract, client)
 
 
 def _generate_queries(title: str, abstract: str, client: LLMClient) -> list[str]:
-    """Generate arXiv search queries from paper metadata."""
     messages = [
-        {"role": "system", "content": ARXIV_QUERY_GEN_SYSTEM},
+        {"role": "system", "content": LITERATURE_QUERY_GEN_SYSTEM},
         {
             "role": "user",
             "content": (
@@ -266,25 +262,21 @@ def _generate_queries(title: str, abstract: str, client: LLMClient) -> list[str]
         return result.queries
     except Exception:
         logger.warning("Query generation failed, using title as fallback")
-        # Fallback: use title words as a single query
         return [title]
 
 
 def _rank_results(
     title: str,
     abstract: str,
-    papers: list[ArxivPaper],
+    works: list[OpenAlexWork],
     client: LLMClient,
 ) -> tuple[list[_RankedResult], list[str]]:
-    """Rank search results by relevance and suggest refinement queries."""
     results_block = "\n\n".join(
-        f"- **{p.arxiv_id}**: {p.title}\n  Authors: {', '.join(p.authors[:3])}\n"
-        f"  Abstract: {p.abstract[:200]}"
-        for p in papers[:20]  # cap at 20 to keep prompt short
+        _format_work_for_ranking(w) for w in works[:20]
     )
 
     messages = [
-        {"role": "system", "content": ARXIV_RANKING_SYSTEM},
+        {"role": "system", "content": LITERATURE_RANKING_SYSTEM},
         {
             "role": "user",
             "content": (
@@ -307,27 +299,47 @@ def _rank_results(
         return ranked, result.refinement_queries
     except Exception:
         logger.warning("Ranking failed, returning unranked results")
-        # Fallback: return all papers unranked
         unranked = [
-            _RankedResult(arxiv_id=p.arxiv_id, relevance_score=0.5, reason="unranked")
-            for p in papers[:_TOP_K]
+            _RankedResult(work_id=w.work_id, relevance_score=0.5, reason="unranked")
+            for w in works[:_TOP_K]
         ]
         return unranked, []
 
 
-def _compile_context(ranked: list[_RankedResult], papers: dict[str, ArxivPaper]) -> str:
-    """Format top-ranked papers as a context block for review prompts."""
-    lines = []
+def _format_work_for_ranking(w: OpenAlexWork) -> str:
+    authors = ", ".join(w.authors[:3])
+    meta_bits = [b for b in (w.venue, w.year) if b]
+    if w.cited_by_count:
+        meta_bits.append(f"{w.cited_by_count} cites")
+    meta = " · ".join(meta_bits) if meta_bits else "venue/year unknown"
+    return (
+        f"- **{w.work_id}**: {w.title}\n"
+        f"  Authors: {authors}\n"
+        f"  Venue: {meta}\n"
+        f"  Abstract: {w.abstract[:200]}"
+    )
+
+
+def _compile_context(
+    ranked: list[_RankedResult], works: dict[str, OpenAlexWork]
+) -> str:
+    lines: list[str] = []
     for i, r in enumerate(ranked, 1):
-        paper = papers.get(r.arxiv_id)
-        if not paper:
+        w = works.get(r.work_id)
+        if not w:
             continue
-        authors_str = ", ".join(paper.authors[:3])
-        if len(paper.authors) > 3:
+        authors_str = ", ".join(w.authors[:3])
+        if len(w.authors) > 3:
             authors_str += " et al."
+        meta_bits = [b for b in (w.venue, w.year) if b]
+        if w.cited_by_count:
+            meta_bits.append(f"{w.cited_by_count} citations")
+        meta_str = " · ".join(meta_bits) if meta_bits else "venue/year unknown"
+        ref = f"DOI:{w.doi}" if w.doi else f"OpenAlex:{w.work_id}"
         lines.append(
-            f"{i}. **{paper.title}** ({authors_str}, {paper.published})\n"
-            f"   arXiv:{paper.arxiv_id} — {r.reason}"
+            f"{i}. **{w.title}** ({authors_str})\n"
+            f"   {meta_str}\n"
+            f"   {ref} — {r.reason}"
         )
 
     if not lines:

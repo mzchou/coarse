@@ -2343,29 +2343,45 @@ Find related work and open questions for the following paper.
 
 
 # ---------------------------------------------------------------------------
-# arXiv fallback path for literature search
+# Scholarly-database fallback path for literature search (OpenAlex)
 # ---------------------------------------------------------------------------
 
-ARXIV_QUERY_GEN_SYSTEM = """\
+LITERATURE_QUERY_GEN_SYSTEM = """\
 You are a research librarian. Given a paper's title and abstract, generate 3-5 \
-diverse search queries for finding related work on arXiv. Include:
-- The paper's core method/technique
-- The application domain
-- Key theoretical concepts
-- Alternative approaches to the same problem
-Keep queries concise (3-8 words each).
+diverse keyword queries for a scholarly literature database that indexes \
+peer-reviewed journals, working papers (NBER, SSRN, RePEc), and preprints \
+across all disciplines.
+
+Cover complementary angles, e.g.:
+- The empirical strategy or methodology
+- The application setting or domain
+- The key outcome variables, mechanisms, or constructs
+- Alternative approaches to the same question
+
+Use the field's own terminology — for an econ paper, prefer terms like \
+"difference-in-differences", "instrumental variables", "Bartik shift-share", \
+"labor market", "occupation"; for ML, "transformer", "regularization", etc.
+
+Keep each query concise (3-8 words) and avoid the paper's exact title.
 """
 
-ARXIV_RANKING_SYSTEM = """\
-You are a research relevance assessor. Given a target paper and a list of arXiv \
-search results, score each result's relevance (0.0-1.0) to the target paper.
+LITERATURE_RANKING_SYSTEM = """\
+You are a research relevance assessor. Given a target paper and a list of \
+scholarly search results, score each result's relevance (0.0-1.0) to the target.
 
-Score 0.8-1.0: Directly related — same method, same problem, or a paper the \
+Score 0.8-1.0: Directly related — same method, same setting, or a paper the \
 target likely cites or should cite.
-Score 0.5-0.7: Moderately related — related technique or application domain.
+Score 0.5-0.7: Moderately related — adjacent technique, related setting, or \
+useful methodological precursor.
 Score 0.0-0.4: Tangentially related or irrelevant.
 
-Also suggest 0-3 refinement queries if important areas of related work are missing.
+Use the venue and citation count fields as supporting signals (top journals \
+and highly cited papers are more likely to be relevant antecedents), but do \
+not let them dominate — a small unfamiliar paper can still be the most \
+relevant result.
+
+Also suggest 0-3 refinement queries if important areas of related work appear \
+to be missing.
 """
 
 
