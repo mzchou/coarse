@@ -30,9 +30,9 @@ from coarse.prompts import (
 logger = logging.getLogger(__name__)
 
 _OPENALEX_API = "https://api.openalex.org/works"
-_MAX_RESULTS_PER_QUERY = 10
+_MAX_RESULTS_PER_QUERY = 15
 _MAX_ITERATIONS = 2
-_TOP_K = 8
+_TOP_K = 15
 _PERPLEXITY_TEMPERATURE = 0.3
 _QUERY_GEN_TEMPERATURE = 0.5
 _RANKING_TEMPERATURE = 0.2
@@ -142,7 +142,7 @@ def _parse_openalex_work(work: dict) -> OpenAlexWork | None:
         work_id=work_id,
         title=" ".join(title.split()),
         authors=authors,
-        abstract=abstract[:500],
+        abstract=abstract[:1200],
         year=str(year) if year else "",
         venue=_extract_venue(work),
         cited_by_count=int(work.get("cited_by_count") or 0),
@@ -316,7 +316,7 @@ def _format_work_for_ranking(w: OpenAlexWork) -> str:
         f"- **{w.work_id}**: {w.title}\n"
         f"  Authors: {authors}\n"
         f"  Venue: {meta}\n"
-        f"  Abstract: {w.abstract[:200]}"
+        f"  Abstract: {w.abstract[:500]}"
     )
 
 
