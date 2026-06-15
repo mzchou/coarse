@@ -34,11 +34,77 @@ _LATEX_PREAMBLE_RE = re.compile(
     r"|begin\{document\}|end\{document\})\b.*$",
     re.MULTILINE,
 )
+_LATEX_INPUT_RE = re.compile(r"\\(?:input|include)\s*\{\s*([^}]+?)\s*\}")
+_MAX_LATEX_INPUT_DEPTH = 25
+
+
+def _latex_directive_active(line_prefix: str) -> bool:
+    """False when an unescaped % earlier on the line comments the directive out."""
+    escaped = False
+    for ch in line_prefix:
+        if escaped:
+            escaped = False
+        elif ch == "\\":
+            escaped = True
+        elif ch == "%":
+            return False
+    return True
+
+
+def _resolve_latex_input(name: str, search_dirs: tuple[Path, ...]) -> Path | None:
+    """Resolve an \\input / \\include target against the given search directories.
+
+    LaTeX resolves these paths relative to the *main* document's directory, but
+    the ``import`` package and some layouts make them relative to the including
+    file. We try both, with and without an added ``.tex`` suffix.
+    """
+    name = name.strip()
+    for base_dir in search_dirs:
+        for candidate in (base_dir / name, base_dir / f"{name}.tex"):
+            if candidate.is_file():
+                return candidate
+    return None
+
+
+def _read_latex_with_inputs(
+    path: Path, root_dir: Path | None = None, seen: frozenset[Path] | None = None, depth: int = 0
+) -> str:
+    """Read LaTeX source, recursively inlining \\input / \\include directives.
+
+    Targets resolve against both the including file's directory and the main
+    document's directory (``root_dir``), with a missing ``.tex`` suffix added.
+    Commented-out directives are left alone; self-referential cycles and runaway
+    depth return empty so extraction of a multi-file paper never hangs.
+    """
+    root_dir = path.parent if root_dir is None else root_dir
+    seen = frozenset() if seen is None else seen
+    resolved = path.resolve()
+    if depth > _MAX_LATEX_INPUT_DEPTH or resolved in seen:
+        return ""
+    seen = seen | {resolved}
+    text = path.read_text(encoding="utf-8")
+    search_dirs = (path.parent, root_dir) if path.parent != root_dir else (root_dir,)
+
+    def _inline(match: re.Match[str]) -> str:
+        line_start = text.rfind("\n", 0, match.start()) + 1
+        if not _latex_directive_active(text[line_start : match.start()]):
+            return match.group(0)
+        target = _resolve_latex_input(match.group(1), search_dirs)
+        if target is None:
+            return match.group(0)
+        return _read_latex_with_inputs(target, root_dir, seen, depth + 1)
+
+    return _LATEX_INPUT_RE.sub(_inline, text)
 
 
 def _extract_latex_regex(path: Path) -> str:
-    """Extract from LaTeX source with heading conversion to markdown."""
-    text = path.read_text(encoding="utf-8")
+    """Extract from LaTeX source with heading conversion to markdown.
+
+    ``\\input`` / ``\\include`` directives are inlined recursively, so a
+    multi-file paper (a main file that pulls in per-section sources) extracts
+    in full instead of collapsing to a handful of bare directive lines.
+    """
+    text = _read_latex_with_inputs(path)
     text = _LATEX_PREAMBLE_RE.sub("", text)
     text = _LATEX_HEADING_RE.sub(lambda m: f"{_LATEX_HEADING_LEVEL[m.group(1)]} {m.group(2)}", text)
     text = re.sub(r"\n{3,}", "\n\n", text)

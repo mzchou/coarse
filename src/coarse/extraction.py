@@ -229,13 +229,11 @@ def _estimate_tokens(text: str) -> int:
     return len(text) // 4
 
 
-_DOCLING_FORMATS = frozenset({".docx", ".html", ".htm", ".tex", ".latex"})
+_DOCLING_FORMATS = frozenset({".docx", ".html", ".htm"})
 _FALLBACKS = {
     ".docx": _extract_docx_mammoth,
     ".html": _extract_html_markdownify,
     ".htm": _extract_html_markdownify,
-    ".tex": _extract_latex_regex,
-    ".latex": _extract_latex_regex,
 }
 
 
@@ -266,7 +264,11 @@ def extract_file(file_path: str | Path, use_cache: bool = True) -> PaperText:
         if cached is not None:
             return cached
 
-    if ext in _DOCLING_FORMATS:
+    if ext in (".tex", ".latex"):
+        # LaTeX always uses the regex extractor: it inlines \input/\include
+        # (Docling reads only the single file given) and keeps math verbatim.
+        full_markdown = _extract_latex_regex(path)
+    elif ext in _DOCLING_FORMATS:
         try:
             full_markdown = _extract_docling(path)
             logger.info("Extracted %s via Docling (%d chars)", ext, len(full_markdown))
