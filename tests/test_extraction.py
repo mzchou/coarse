@@ -1018,6 +1018,22 @@ def test_extract_file_tex(tmp_path: Path) -> None:
     assert result.garble_ratio == 0.0
 
 
+def test_extract_file_tex_inlines_inputs(tmp_path: Path) -> None:
+    """extract_file routes multi-file LaTeX through the input-inlining path."""
+    (tmp_path / "sections").mkdir()
+    (tmp_path / "sections" / "body.tex").write_text(
+        "\\section{Findings}\nKey result.\n", encoding="utf-8"
+    )
+    main = tmp_path / "paper.tex"
+    main.write_text(
+        "\\documentclass{article}\n\\begin{document}\n\\input{sections/body}\n\\end{document}\n",
+        encoding="utf-8",
+    )
+    result = extract_file(main, use_cache=False)
+    assert "# Findings" in result.full_markdown
+    assert "Key result." in result.full_markdown
+
+
 def test_extract_file_unsupported(tmp_path: Path) -> None:
     """Unsupported extensions raise ExtractionError."""
     bad = tmp_path / "paper.xyz"
